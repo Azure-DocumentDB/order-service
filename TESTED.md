@@ -26,9 +26,23 @@ Topology: disposable **managed Azure DocumentDB M30, MongoDB 8.0 compatibility, 
 
 Earlier failing runs are **not** counted as passing: actual Azure contention exposed unlabeled `117 ConflictingOperationInProgress` and `112 WriteConflict`. Exact code/name normalization is limited to precommit callback `find`/`insert`/`update`, rethrowing to the SDK's abort/retry path within the original 20-second budget; commit and unknown-result exclusions remain. The subsequent probe-only `AnyEq` serializer failure was reproduced offline and replaced with typed `ElemMatch`, without weakening stock/order/count assertions. The passing results above are from the corrected source.
 
+## Rendered-browser verification — 2026-10-13
+
+Tested application source: `90d44b1e6c908d725375e3ccd873c7835be9e011`. The browser gate was rerun after the loopback navigation policy was resolved. Managed Chrome rendered the actual loopback operator UI against the separately seeded `orders_demo_ui_20261013` database on managed Azure DocumentDB M30, using native SCRAM; no mock store or fallback data was substituted.
+
+- Authenticated inventory/orders loading passed: initial stock was 50 notebooks / 100 pens, with no orders.
+- A UI request for 2 notebooks and 3 pens returned **201**, created one order, and refreshed stock to **48 / 97**. Repeating the same key and payload returned **200 / replayed=true**, the same order ID, one persisted order, and unchanged stock.
+- Changing quantities under that key displayed **409 / idempotency_conflict**. An explicit inventory/orders refresh confirmed unchanged stock and order count.
+- Invalid-token reads and writes displayed **401 / unauthorized**. Reload cleared the token; an empty-token load also displayed 401 without showing fallback inventory/orders. The password input is masked; localStorage and sessionStorage remained empty.
+- Keyboard Tab/Enter activated Load, Send/replay, and Generate NEW key, with a visible 3px focus outline. A second-item out-of-stock request under a new key displayed **409 / out_of_stock**; an explicit refresh confirmed both products' stock and the single order remained unchanged.
+- Desktop 1200×840 and narrow 390×844 / 320×740 viewports were checked. Narrow layouts collapsed to one column; measured document widths matched viewport widths without page-level horizontal overflow in the checked states. Desktop and mobile screenshots were visually reviewed. This is not a full accessibility audit or physical-device test.
+- No uncaught browser page errors were recorded. Console resource errors were accounted for: deliberate 401/409 cases plus one nonblocking missing `favicon.ico` 404.
+
+Credential-free screenshots, observed response/stock records, browser request/console/error logs, and preserved offline/live evidence are retained by the maintainer. The operator token was supplied through supported file-to-stdin browser actions, not embedded in source or evidence. This browser run did not repeat the earlier .NET/Python suites or Entra/live concurrency probes; their records above remain unchanged. The visible-failure claim covers actual 401/409 responses, not a browser offline/server-down fault. After a failed refresh, previously loaded lists remain visible alongside the explicit error result.
+
 ## Remaining publication gates
 
-- **Rendered-browser interaction and visual review: not verified.** Navigation to the loopback sample URL was blocked by the browser tool's local-address policy. HTTP/API tests are not a rendered-browser pass.
+- Parent/operator review of the browser evidence is still required before publication.
 - GitHub CI must pass on the final PR head before release. CI deliberately has no Azure credentials and does not repeat the live tests above.
 - The repository remains private and unmerged pending these gates. This document is evidence, not release approval.
 
