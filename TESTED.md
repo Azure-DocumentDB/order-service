@@ -40,11 +40,13 @@ Tested application source: `90d44b1e6c908d725375e3ccd873c7835be9e011`. The brows
 
 Credential-free screenshots, observed response/stock records, browser request/console/error logs, and preserved offline/live evidence are retained by the maintainer. The operator token was supplied through supported file-to-stdin browser actions, not embedded in source or evidence. This browser run did not repeat the earlier .NET/Python suites or Entra/live concurrency probes; their records above remain unchanged. The visible-failure claim covers actual 401/409 responses, not a browser offline/server-down fault. After a failed refresh, previously loaded lists remain visible alongside the explicit error result.
 
-## Remaining publication gates
+## Release verification — 2026-10-13
 
-- Parent/operator review of the browser evidence is still required before publication.
-- GitHub CI must pass on the final PR head before release. CI deliberately has no Azure credentials and does not repeat the live tests above.
-- The repository remains private and unmerged pending these gates. This document is evidence, not release approval.
+- Independent final review covered the complete PR change, application/probe/test source, dependency locks, prior findings, preserved live evidence, browser response logs and all four screenshots. The earlier loopback-binding blocker is resolved. The enumerated managed-service and rendered-browser acceptance gates passed; no release-blocking defect was found.
+- The stale-list behavior after failed refresh is a documented, nonblocking operator-UI limitation: the error result is explicit, no successful fetch or fallback data is fabricated, and server-side authorization/conditional stock checks remain enforced. On narrow screens the result may be below the fold. The missing favicon is cosmetic, not a script/style or application failure.
+- Fresh local locked restore and Release build passed with zero warnings/errors; **103 .NET tests** and **17 audit-parser Python tests** passed, all three current-feed direct/transitive dependency audits passed, and the no-opt-in live probe failed closed. The four process-binding cases require a free port 5080; the acceptance server was deliberately left untouched. The complete **21-test Python suite** is required in the isolated final-head GitHub CI runner (the preserved earlier local 21-test pass is not counted as a fresh rerun).
+- Source and full-history secret scans passed before publication. Release uses the existing [PR #1](https://github.com/Azure-DocumentDB/order-service/pull/1), an exact-head successful [CI run](https://github.com/Azure-DocumentDB/order-service/actions), and a normal head-guarded merge without administrative bypass. CI deliberately has no Azure credentials and does not repeat the live tests above. The PR and Actions records provide the final release SHA/status rather than this document predicting its own commit hash.
+- Publication verification additionally requires successful merged-main CI and an anonymous fresh clone with locked restore/build/tests and current dependency audit. Repository visibility is not a claim of public application hosting. Resource-group teardown remains a separate operator responsibility; this release review neither performs nor claims cloud cleanup.
 
 ## Limits
 
