@@ -60,7 +60,8 @@ try
         start.Release(concurrency);
         var outcomes = await Task.WhenAll(tasks);
         stage = $"race_{concurrency}_verification";
-        var persisted = await orders.Find(Builders<Order>.Filter.AnyEq("Items.ProductId", product)).ToListAsync(ct);
+        // Match the array of LineItem documents, not AnyEq on the traversed scalar string field.
+        var persisted = await orders.Find(Builders<Order>.Filter.ElemMatch(o => o.Items, item => item.ProductId == product)).ToListAsync(ct);
         var stock = (await Stock(product)).Stock;
         Check(outcomes.Count(x => !x.SoldOut) == 5, $"race_{concurrency}_five_successes");
         Check(outcomes.Count(x => x.SoldOut) == concurrency - 5, $"race_{concurrency}_remaining_sold_out");
