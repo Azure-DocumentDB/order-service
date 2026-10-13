@@ -1,0 +1,9 @@
+**/bin/
+**/obj/
+.env
+.env.*
+!.env.example
+TestResults/
+artifacts/
+__pycache__/
+*.user
