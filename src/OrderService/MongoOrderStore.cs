@@ -27,7 +27,9 @@ public sealed class MongoOrderStore : IOrderStore
         var validated = OrderRules.Validate(request);
         // Full driver retry loop bounded independently of the HTTP connection. WithTransactionAsync
         // retries TransientTransactionError; UnknownTransactionCommitResult retries the SAME commit.
-        // Never catch Mongo exceptions in the callback: the driver needs labels to abort/retry correctly.
+        // Never swallow callback exceptions: the driver needs them to abort before retrying.
+        // Managed Azure can return unlabeled code 117 during a callback command. The narrowly
+        // scoped normalization below applies ONLY before any commit attempt; never to commit errors.
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(TimeSpan.FromSeconds(20));
         var order = new Order(key, Guid.NewGuid().ToString("N"), validated.Fingerprint, validated.Items, DateTime.UtcNow);
@@ -36,22 +38,36 @@ public sealed class MongoOrderStore : IOrderStore
         {
             return await session.WithTransactionAsync(async (s, ct) =>
             {
-                var existing = await orders.Find(s, o => o.Id == key).FirstOrDefaultAsync(ct);
-                if (existing is not null) return OrderRules.Replay(existing, validated);
-                // _id is the unique, immutable idempotency record, in the same transaction as stock.
-                // Insert before touching inventory to contend on a repeated key early.
-                await orders.InsertOneAsync(s, order, cancellationToken: ct);
-                var completed = 0;
-                foreach (var item in validated.Items)
+                try
                 {
-                    var filter = Builders<Product>.Filter.Eq(p => p.Id, item.ProductId) &
-                                 Builders<Product>.Filter.Gte(p => p.Stock, item.Quantity);
-                    var changed = await inventory.UpdateOneAsync(s, filter,
-                        Builders<Product>.Update.Inc(p => p.Stock, -item.Quantity), cancellationToken: ct);
-                    if (changed.ModifiedCount != 1) throw new OrderException("out_of_stock", 409);
-                    await observer.AfterReservationAsync(++completed, ct);
+                    var existing = await orders.Find(s, o => o.Id == key).FirstOrDefaultAsync(ct);
+                    if (existing is not null) return OrderRules.Replay(existing, validated);
+                    // _id is the unique, immutable idempotency record, in the same transaction as stock.
+                    // Insert before touching inventory to contend on a repeated key early.
+                    await orders.InsertOneAsync(s, order, cancellationToken: ct);
+                    var completed = 0;
+                    foreach (var item in validated.Items)
+                    {
+                        var filter = Builders<Product>.Filter.Eq(p => p.Id, item.ProductId) &
+                                     Builders<Product>.Filter.Gte(p => p.Stock, item.Quantity);
+                        var changed = await inventory.UpdateOneAsync(s, filter,
+                            Builders<Product>.Update.Inc(p => p.Stock, -item.Quantity), cancellationToken: ct);
+                        if (changed.ModifiedCount != 1) throw new OrderException("out_of_stock", 409);
+                        await observer.AfterReservationAsync(++completed, ct);
+                    }
+                    return new OrderResult(order, false);
                 }
-                return new OrderResult(order, false);
+                catch (MongoCommandException ex) when (IsPreCommitConflict(ex))
+                {
+                    // WithTransactionAsync catches this rethrow, aborts the current transaction,
+                    // then retries the WHOLE callback with the SAME immutable key/order under the
+                    // original 20s cancellation budget and driver's exponential-jitter backoff.
+                    // No commit has been attempted here; neither an old nor partial transaction is
+                    // allowed to commit. Abort acknowledgement is NOT claimed (driver suppresses
+                    // abort errors per spec). This is not used for commit/unknown-result errors.
+                    ex.AddErrorLabel("TransientTransactionError");
+                    throw;
+                }
             }, new TransactionOptions(readConcern: ReadConcern.Snapshot, readPreference: ReadPreference.Primary,
                 writeConcern: WriteConcern.WMajority, maxCommitTime: TimeSpan.FromSeconds(5)), budget.Token);
         }
@@ -72,6 +88,12 @@ public sealed class MongoOrderStore : IOrderStore
             return await ResolveAsync(key, validated);
         }
     }
+
+    private static bool IsPreCommitConflict(MongoCommandException error) =>
+        error.Code == 117 && error.CodeName == "ConflictingOperationInProgress" &&
+        !error.HasErrorLabel("UnknownTransactionCommitResult") &&
+        error.Command is { ElementCount: > 0 } command &&
+        command.GetElement(0).Name is "find" or "insert" or "update";
 
     private async Task<OrderResult> ResolveAsync(string key, ValidatedOrder request)
     {

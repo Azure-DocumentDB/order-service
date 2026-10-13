@@ -98,6 +98,124 @@ public class TransactionTests
         Assert.Equal("out_of_stock", (await Assert.ThrowsAsync<OrderException>(() => fixture.Store().PlaceAsync("key", new([new("a", 1)]), CancellationToken.None))).Code);
         fixture.Observer.Verify(o => o.AfterReservationAsync(It.IsAny<int>(), It.IsAny<CancellationToken>()), Times.Never);
     }
+    private static MongoCommandException Conflict(string command = "update", int code = 117, string name = "ConflictingOperationInProgress") =>
+        new(new MongoDB.Driver.Core.Connections.ConnectionId(new MongoDB.Driver.Core.Servers.ServerId(
+            new MongoDB.Driver.Core.Clusters.ClusterId(), new System.Net.DnsEndPoint("synthetic.invalid", 27017))),
+            "synthetic conflict", new BsonDocument(command, "synthetic"),
+            new BsonDocument { { "ok", 0 }, { "code", code }, { "codeName", name }, { "errmsg", "synthetic" } });
+
+    [Theory][InlineData("find")][InlineData("insert")][InlineData("update")]
+    public async Task Unlabeled117InsideCallbackEscapesWithTransientLabel(string command)
+    {
+        var fixture = new Fixture();
+        var error = Conflict(command);
+        fixture.Observer.Setup(o => o.AfterReservationAsync(1, It.IsAny<CancellationToken>())).ThrowsAsync(error);
+        var actual = await Assert.ThrowsAsync<MongoCommandException>(() => fixture.Store().PlaceAsync("same-key", new([new("a", 1)]), CancellationToken.None));
+        Assert.Same(error, actual);
+        Assert.True(actual.HasErrorLabel("TransientTransactionError"));
+        Assert.True(fixture.TransactionToken.CanBeCanceled);
+    }
+
+    [Theory][InlineData("commitTransaction", 117, "ConflictingOperationInProgress")]
+    [InlineData("create", 117, "ConflictingOperationInProgress")]
+    [InlineData("update", 112, "WriteConflict")]
+    [InlineData("update", 117, "SomethingElse")]
+    public async Task OtherCommandsCodesAndNamesAreNotReclassified(string command, int code, string name)
+    {
+        var fixture = new Fixture();
+        var error = Conflict(command, code, name);
+        fixture.Observer.Setup(o => o.AfterReservationAsync(1, It.IsAny<CancellationToken>())).ThrowsAsync(error);
+        var actual = await Assert.ThrowsAsync<MongoCommandException>(() => fixture.Store().PlaceAsync("key", new([new("a", 1)]), CancellationToken.None));
+        Assert.False(actual.HasErrorLabel("TransientTransactionError"));
+    }
+
+    [Fact] public async Task UnlabeledCommitFailureOutsideCallbackIsNeverWholeTransactionRetry()
+    {
+        var fixture = new Fixture();
+        var error = Conflict("commitTransaction");
+        fixture.Session.Setup(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(error);
+        var actual = await Assert.ThrowsAsync<MongoCommandException>(() => fixture.Store().PlaceAsync("key", new([new("a", 1)]), CancellationToken.None));
+        Assert.Same(error, actual);
+        Assert.False(actual.HasErrorLabel("TransientTransactionError"));
+        fixture.Session.Verify(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact] public async Task UnknownCommitLabelNeverBecomesWholeTransactionRetry()
+    {
+        var fixture = new Fixture();
+        var error = Conflict(); error.AddErrorLabel("UnknownTransactionCommitResult");
+        fixture.Observer.Setup(o => o.AfterReservationAsync(1, It.IsAny<CancellationToken>())).ThrowsAsync(error);
+        fixture.Orders.Setup(o => o.WithReadConcern(ReadConcern.Majority)).Returns(fixture.Orders.Object);
+        fixture.Orders.Setup(o => o.WithReadPreference(ReadPreference.Primary)).Returns(fixture.Orders.Object);
+        var cursor = new Mock<IAsyncCursor<Order>>();
+        cursor.Setup(c => c.MoveNextAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        fixture.Orders.Setup(o => o.FindAsync(It.IsAny<FilterDefinition<Order>>(), It.IsAny<FindOptions<Order, Order>>(), It.IsAny<CancellationToken>())).ReturnsAsync(cursor.Object);
+        var actual = await Assert.ThrowsAsync<OrderException>(() => fixture.Store().PlaceAsync("key", new([new("a", 1)]), CancellationToken.None));
+        Assert.Equal("outcome_unknown_retry_same_key", actual.Code);
+        Assert.False(error.HasErrorLabel("TransientTransactionError"));
+        fixture.Session.Verify(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact] public async Task OriginalTwentySecondBudgetCancelsBlockedDriverAndReturnsUnknown()
+    {
+        var fixture = new Fixture();
+        fixture.Session.Setup(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()))
+            .Returns(async (Func<IClientSessionHandle, CancellationToken, Task<OrderResult>> _, TransactionOptions _, CancellationToken ct) =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+                throw new InvalidOperationException("unreachable");
+            });
+        fixture.Orders.Setup(o => o.WithReadConcern(ReadConcern.Majority)).Returns(fixture.Orders.Object);
+        fixture.Orders.Setup(o => o.WithReadPreference(ReadPreference.Primary)).Returns(fixture.Orders.Object);
+        var cursor = new Mock<IAsyncCursor<Order>>();
+        cursor.Setup(c => c.MoveNextAsync(It.IsAny<CancellationToken>())).ReturnsAsync(false);
+        fixture.Orders.Setup(o => o.FindAsync(It.IsAny<FilterDefinition<Order>>(), It.IsAny<FindOptions<Order, Order>>(), It.IsAny<CancellationToken>())).ReturnsAsync(cursor.Object);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        var actual = await Assert.ThrowsAsync<OrderException>(() => fixture.Store().PlaceAsync("same-key", new([new("a", 1)]), CancellationToken.None));
+        Assert.Equal("outcome_unknown_retry_same_key", actual.Code);
+        Assert.InRange(clock.Elapsed.TotalSeconds, 18, 29);
+        fixture.Session.Verify(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact] public async Task CallerCancellationIsLinkedAcrossSdkRetryBudget()
+    {
+        var fixture = new Fixture();
+        using var caller = new CancellationTokenSource();
+        fixture.Observer.Setup(o => o.AfterReservationAsync(1, It.IsAny<CancellationToken>()))
+            .Returns((int _, CancellationToken ct) => { caller.Cancel(); ct.ThrowIfCancellationRequested(); return Task.CompletedTask; });
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => fixture.Store().PlaceAsync("key", new([new("a", 1)]), caller.Token));
+        Assert.True(fixture.TransactionToken.IsCancellationRequested);
+        Assert.Single(fixture.Inserted);
+    }
+
+    [Fact] public async Task CallbackRetryKeepsKeyOrderIdAndOriginalCancellationBudget()
+    {
+        var fixture = new Fixture();
+        fixture.Observer.SetupSequence(o => o.AfterReservationAsync(1, It.IsAny<CancellationToken>()))
+            .ThrowsAsync(Conflict()).Returns(Task.CompletedTask);
+        var attempts = 0;
+        fixture.Session.Setup(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()))
+            .Returns(async (Func<IClientSessionHandle, CancellationToken, Task<OrderResult>> callback, TransactionOptions _, CancellationToken ct) =>
+            {
+                // Model SDK abort-then-retry scheduling; live probe must prove actual rollback.
+                attempts++;
+                try { return await callback(fixture.Session.Object, ct); }
+                catch (MongoCommandException ex) when (ex.HasErrorLabel("TransientTransactionError"))
+                {
+                    Assert.True(ct.CanBeCanceled);
+                    attempts++;
+                    return await callback(fixture.Session.Object, ct);
+                }
+            });
+        var result = await fixture.Store().PlaceAsync("same-key", new([new("a", 1)]), CancellationToken.None);
+        Assert.Equal(2, attempts);
+        Assert.Equal(2, fixture.Inserted.Count);
+        Assert.All(fixture.Inserted, order => Assert.Equal("same-key", order.Id));
+        Assert.Equal(fixture.Inserted[0].OrderId, fixture.Inserted[1].OrderId);
+        Assert.Equal(fixture.Inserted[0].OrderId, result.Order.OrderId);
+    }
+
     [Fact] public async Task TransientLabelsEscapeCallbackIntactForSdkRetry()
     {
         var fixture = new Fixture();
