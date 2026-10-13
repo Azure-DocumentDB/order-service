@@ -104,11 +104,17 @@ public class TransactionTests
             "synthetic conflict", new BsonDocument(command, "synthetic"),
             new BsonDocument { { "ok", 0 }, { "code", code }, { "codeName", name }, { "errmsg", "synthetic" } });
 
-    [Theory][InlineData("find")][InlineData("insert")][InlineData("update")]
-    public async Task Unlabeled117InsideCallbackEscapesWithTransientLabel(string command)
+    [Theory]
+    [InlineData("find", 117, "ConflictingOperationInProgress")]
+    [InlineData("insert", 117, "ConflictingOperationInProgress")]
+    [InlineData("update", 117, "ConflictingOperationInProgress")]
+    [InlineData("find", 112, "WriteConflict")]
+    [InlineData("insert", 112, "WriteConflict")]
+    [InlineData("update", 112, "WriteConflict")]
+    public async Task UnlabeledConflictInsideCallbackEscapesWithTransientLabel(string command, int code, string name)
     {
         var fixture = new Fixture();
-        var error = Conflict(command);
+        var error = Conflict(command, code, name);
         fixture.Observer.Setup(o => o.AfterReservationAsync(1, It.IsAny<CancellationToken>())).ThrowsAsync(error);
         var actual = await Assert.ThrowsAsync<MongoCommandException>(() => fixture.Store().PlaceAsync("same-key", new([new("a", 1)]), CancellationToken.None));
         Assert.Same(error, actual);
@@ -118,7 +124,12 @@ public class TransactionTests
 
     [Theory][InlineData("commitTransaction", 117, "ConflictingOperationInProgress")]
     [InlineData("create", 117, "ConflictingOperationInProgress")]
-    [InlineData("update", 112, "WriteConflict")]
+    [InlineData("commitTransaction", 112, "WriteConflict")]
+    [InlineData("create", 112, "WriteConflict")]
+    [InlineData("update", 112, "SomethingElse")]
+    [InlineData("update", 117, "WriteConflict")]
+    [InlineData("update", 112, "ConflictingOperationInProgress")]
+    [InlineData("update", 999, "WriteConflict")]
     [InlineData("update", 117, "SomethingElse")]
     public async Task OtherCommandsCodesAndNamesAreNotReclassified(string command, int code, string name)
     {
@@ -129,10 +140,11 @@ public class TransactionTests
         Assert.False(actual.HasErrorLabel("TransientTransactionError"));
     }
 
-    [Fact] public async Task UnlabeledCommitFailureOutsideCallbackIsNeverWholeTransactionRetry()
+    [Theory][InlineData(117, "ConflictingOperationInProgress")][InlineData(112, "WriteConflict")]
+    public async Task UnlabeledCommitFailureOutsideCallbackIsNeverWholeTransactionRetry(int code, string name)
     {
         var fixture = new Fixture();
-        var error = Conflict("commitTransaction");
+        var error = Conflict("commitTransaction", code, name);
         fixture.Session.Setup(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(error);
         var actual = await Assert.ThrowsAsync<MongoCommandException>(() => fixture.Store().PlaceAsync("key", new([new("a", 1)]), CancellationToken.None));
@@ -141,10 +153,11 @@ public class TransactionTests
         fixture.Session.Verify(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
-    [Fact] public async Task UnknownCommitLabelNeverBecomesWholeTransactionRetry()
+    [Theory][InlineData(117, "ConflictingOperationInProgress")][InlineData(112, "WriteConflict")]
+    public async Task UnknownCommitLabelNeverBecomesWholeTransactionRetry(int code, string name)
     {
         var fixture = new Fixture();
-        var error = Conflict(); error.AddErrorLabel("UnknownTransactionCommitResult");
+        var error = Conflict("update", code, name); error.AddErrorLabel("UnknownTransactionCommitResult");
         fixture.Observer.Setup(o => o.AfterReservationAsync(1, It.IsAny<CancellationToken>())).ThrowsAsync(error);
         fixture.Orders.Setup(o => o.WithReadConcern(ReadConcern.Majority)).Returns(fixture.Orders.Object);
         fixture.Orders.Setup(o => o.WithReadPreference(ReadPreference.Primary)).Returns(fixture.Orders.Object);
@@ -189,11 +202,12 @@ public class TransactionTests
         Assert.Single(fixture.Inserted);
     }
 
-    [Fact] public async Task CallbackRetryKeepsKeyOrderIdAndOriginalCancellationBudget()
+    [Theory][InlineData(117, "ConflictingOperationInProgress")][InlineData(112, "WriteConflict")]
+    public async Task CallbackRetryKeepsKeyOrderIdAndOriginalCancellationBudget(int code, string name)
     {
         var fixture = new Fixture();
         fixture.Observer.SetupSequence(o => o.AfterReservationAsync(1, It.IsAny<CancellationToken>()))
-            .ThrowsAsync(Conflict()).Returns(Task.CompletedTask);
+            .ThrowsAsync(Conflict("update", code, name)).Returns(Task.CompletedTask);
         var attempts = 0;
         fixture.Session.Setup(s => s.WithTransactionAsync(It.IsAny<Func<IClientSessionHandle, CancellationToken, Task<OrderResult>>>(), It.IsAny<TransactionOptions>(), It.IsAny<CancellationToken>()))
             .Returns(async (Func<IClientSessionHandle, CancellationToken, Task<OrderResult>> callback, TransactionOptions _, CancellationToken ct) =>

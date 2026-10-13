@@ -28,7 +28,7 @@ public sealed class MongoOrderStore : IOrderStore
         // Full driver retry loop bounded independently of the HTTP connection. WithTransactionAsync
         // retries TransientTransactionError; UnknownTransactionCommitResult retries the SAME commit.
         // Never swallow callback exceptions: the driver needs them to abort before retrying.
-        // Managed Azure can return unlabeled code 117 during a callback command. The narrowly
+        // Managed Azure can return unlabeled code 117 or 112 during a callback command. The narrowly
         // scoped normalization below applies ONLY before any commit attempt; never to commit errors.
         using var budget = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         budget.CancelAfter(TimeSpan.FromSeconds(20));
@@ -90,7 +90,8 @@ public sealed class MongoOrderStore : IOrderStore
     }
 
     private static bool IsPreCommitConflict(MongoCommandException error) =>
-        error.Code == 117 && error.CodeName == "ConflictingOperationInProgress" &&
+        (error.Code == 117 && error.CodeName == "ConflictingOperationInProgress" ||
+         error.Code == 112 && error.CodeName == "WriteConflict") &&
         !error.HasErrorLabel("UnknownTransactionCommitResult") &&
         error.Command is { ElementCount: > 0 } command &&
         command.GetElement(0).Name is "find" or "insert" or "update";
