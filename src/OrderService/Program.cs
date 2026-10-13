@@ -19,8 +19,12 @@ try
         return;
     }
     var builder = WebApplication.CreateBuilder(args);
-    // Deliberately operator-local only: do not inherit ASPNETCORE_URLS from an unsafe environment.
-    builder.WebHost.UseUrls("http://127.0.0.1:5080");
+    // Kestrel endpoint configuration normally overrides UseUrls and can add extra listeners.
+    // Reject it before Build/Start (whether supplied by JSON, environment, or command line).
+    if (builder.Configuration.GetSection("Kestrel:Endpoints").GetChildren().Any())
+        throw new ConfigurationException("Configured Kestrel endpoints are not supported by this loopback-only demo.");
+    // PreferHostingUrls is defense in depth; neither URLS nor Kestrel may expose the bearer API.
+    builder.WebHost.UseUrls("http://127.0.0.1:5080").PreferHostingUrls(true);
     builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 8192);
     builder.Logging.ClearProviders(); // Never print connection strings, driver exceptions or request payloads.
     builder.Services.ConfigureHttpJsonOptions(o =>

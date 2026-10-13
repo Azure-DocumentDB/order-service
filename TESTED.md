@@ -5,7 +5,7 @@
 - SDK: .NET 10.0.401, MongoDB.Driver 3.12.0, Azure.Identity 1.21.0.
 - Locked restore and Release build: passed, zero warnings/errors.
 - Permanent .NET unit / mock API / driver-wiring tests: **78 passed, 0 failed, 0 skipped**.
-- Permanent Python NuGet audit-schema tests: **17 passed**.
+- Permanent Python tests: **21 passed**: 17 NuGet audit-schema tests plus 4 actual-process Kestrel binding regressions (external endpoint configuration via environment/arguments/JSON refused; `ASPNETCORE_URLS` cannot expose the API; nonloopback access refused). No database credentials/calls used for those tests.
 - Current NuGet direct + transitive vulnerability audit: passed for all three projects; no findings returned. Audit parser supports the actual .NET 10 clean sparse result shape and rejects malformed/error-bearing results.
 - Live harness without explicit opt-in: **correctly fails** (exit 1, `live_opt_in_required`); this is a safety test, not a live pass.
 
